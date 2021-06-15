@@ -10,6 +10,8 @@ from dash.dependencies import Input, Output
 from skimage import data, draw
 from scipy import ndimage
 
+#https://github.com/plotly/dash-sample-apps/blob/master/apps/dash-image-segmentation/app.py
+
 class_labels = [1, 2]
 class_label_colormap = ["#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2"]
 
