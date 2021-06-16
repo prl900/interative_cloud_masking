@@ -1,32 +1,64 @@
-import plotly.express as px
 import dash
+from dash import callback_context
 from dash.dependencies import Input, Output, State
 import dash_html_components as html
 import dash_core_components as dcc
 import dash_bootstrap_components as dbc
+
+import plotly.express as px
+
+import xarray as xr
+import numpy as np
 import json
-from skimage import io as skio
+from skimage import data, draw
+from scipy import ndimage
 import io
 import base64
 import PIL.Image
 import pickle
 from time import time
 
+IMG_SIZE = 800
 DEFAULT_STROKE_WIDTH = 3  # gives line width of 2^3 = 8
 
-DEFAULT_IMAGE_PATH = "assets/segmentation_img.jpg"
-
 # the number of different classes for labels
-NUM_LABEL_CLASSES = 5
+NUM_LABEL_CLASSES = 3
 DEFAULT_LABEL_CLASS = 0
-class_label_colormap = ["#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2"]
+class_label_colormap = ["#56B4E9", "#E69F00", "#009E73"]
+color2class = {"#56B4E9": np.uint8(1), "#E69F00":np.uint8(2), "#009E73":np.uint8(3)}
+
 class_labels = list(range(NUM_LABEL_CLASSES))
+
+ds = xr.open_dataset("http://dapds00.nci.org.au/thredds/dodsC/ub8/au/blobs/sample_stack.nc")
+MAX_ITIME = len(ds.time.values)
+
 # we can't have less colors than classes
 assert NUM_LABEL_CLASSES <= len(class_label_colormap)
 
-# Font and background colors associated with each theme
-text_color = {"dark": "#95969A", "light": "#595959"}
-card_color = {"dark": "#2D3038", "light": "#FFFFFF"}
+def path_to_indices(path):
+    """From SVG path to numpy array of coordinates, each row being a (row, col) point
+    """
+    indices_str = [
+        el.replace("M", "").replace("Z", "").split(",") for el in path.split("L")
+    ]
+    return np.rint(np.array(indices_str, dtype=float)).astype(np.int)
+
+
+def path_to_mask(shapes, dims):
+    """From SVG path to a boolean array where all pixels enclosed by the path
+    are True, and the other pixels are False.
+    """
+    mask = np.zeros(dims, dtype=np.uint8)
+    for shape in shapes:#last_shape = relayout_data["shapes"]#[-1]
+        shape_mask = np.zeros(dims, dtype=np.uint8)
+        cols, rows = path_to_indices(shape["path"]).T
+        rr, cc = draw.polygon(rows, cols)
+        shape_mask[rr, cc] = True
+        shape_mask = ndimage.binary_fill_holes(shape_mask)
+
+        mask += shape_mask*color2class[shape['line']['color']]
+
+    return mask
 
 
 def class_to_color(n):
@@ -37,30 +69,40 @@ def color_to_class(c):
     return class_label_colormap.index(c)
 
 
-img = skio.imread(DEFAULT_IMAGE_PATH)
 
-external_stylesheets = [dbc.themes.BOOTSTRAP, "assets/segmentation-style.css"]
-app = dash.Dash(__name__, external_stylesheets=external_stylesheets)
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 
 server = app.server
 app.title = "Interactive image segmentation based on machine learning"
 
 
-def make_default_figure(
+def ls_figure(
+    itime=0,
     stroke_color=class_to_color(DEFAULT_LABEL_CLASS),
-    stroke_width=DEFAULT_STROKE_WIDTH,
+    stroke_width=int(round(2 ** (DEFAULT_STROKE_WIDTH))),
     shapes=[],
 ):
-    fig = px.imshow(img)
+    img = ds.nbart_blue.isel(x=slice(400, 800), y=slice(0,400), time=itime).values
+    fig = px.imshow(img, width=IMG_SIZE, height=IMG_SIZE)
     fig.update_layout(
         {
-            "dragmode": "drawopenpath",
+            "dragmode": "drawclosedpath",
             "shapes": shapes,
             "newshape.line.color": stroke_color,
             "newshape.line.width": stroke_width,
             "margin": dict(l=0, r=0, b=0, t=0, pad=4),
         }
     )
+    return fig
+
+def mask_figure(
+    dims=(400,400),
+    shapes=[],
+):
+    mask = path_to_mask(shapes, dims)
+    fig = px.imshow(mask, width=550, height=550, range_color=[0.0, 3.0], color_continuous_scale=['black', '#56B4E9', '#E69F00', '#009E73'])
+    fig.update_layout(coloraxis_showscale=False)
+
     return fig
 
 
@@ -76,24 +118,39 @@ segmentation = [
                     html.Div(
                         id="transparent-loader-wrapper",
                         children=[
-                            dcc.Loading(
-                                id="segmentations-loading",
-                                type="circle",
-                                children=[
+                            #dcc.Loading(
+                                #id="segmentations-loading",
+                                #type="circle",
+                                #children=[
                                     # Graph
                                     dcc.Graph(
                                         id="graph",
-                                        figure=make_default_figure(),
+                                        figure=ls_figure(),
                                         config={
                                             "modeBarButtonsToAdd": [
                                                 "drawrect",
-                                                "drawopenpath",
+                                                "drawclosedpath",
                                                 "eraseshape",
                                             ]
                                         },
                                     ),
-                                ],
-                            )
+                    html.Hr(),
+                    dbc.Form(
+                        [
+                            dbc.FormGroup(
+                                [
+                                    dbc.Label(
+                                        "Image Navigation",
+                                        html_for="nav-images",
+                                    ),
+                                    dbc.ButtonGroup(id="nav-images", children=[dbc.Button("Prev", id={"type": "nav-images-button", "index": -1}), 
+                                                                               dbc.Button("Next", id={"type": "nav-images-button", "index": 1})]),
+                                ]
+                            ),
+                        ]
+                    ),
+                                #],
+                            #)
                         ],
                     ),
                 ]
@@ -101,6 +158,8 @@ segmentation = [
         ],
     )
 ]
+
+button_name = {0: "cloud", 1: "shadow", 2: "clean"}
 
 # sidebar
 sidebar = [
@@ -116,7 +175,7 @@ sidebar = [
                         id="label-class-buttons",
                         children=[
                             dbc.Button(
-                                "%2d" % (n,),
+                                button_name[n],
                                 id={"type": "label-class-button", "index": n},
                                 style={"background-color": class_to_color(c)},
                             )
@@ -144,6 +203,23 @@ sidebar = [
                             ),
                         ]
                     ),
+                    html.Hr(),
+                    dbc.Form(
+                        [
+                            dbc.FormGroup(
+                                [
+                                    dbc.Label(
+                                        "Label array",
+                                        html_for="mask",
+                                    ),
+                                    dcc.Graph(
+                                        id="mask",
+                                        figure=mask_figure(),
+                                    ),
+                                ]
+                            ),
+                        ]
+                    ),
                 ]
             ),
         ],
@@ -156,7 +232,8 @@ meta = [
         children=[
             # Store for user created masks
             # data is a list of dicts describing shapes
-            dcc.Store(id="masks", data={"shapes": []}),
+            dcc.Store(id="masks", data={"shapes": [[] for _ in range(MAX_ITIME)]}),
+            dcc.Store(id="itime", data= 0),
         ],
     ),
 ]
@@ -180,24 +257,40 @@ app.layout = html.Div(
 @app.callback(
     [
         Output("graph", "figure"),
+        Output("mask", "figure"),
         Output("masks", "data"),
+        Output("itime", "data"),
     ],
     [
         Input("graph", "relayoutData"),
+        Input(
+            {"type": "nav-images-button", "index": dash.dependencies.ALL},
+            "n_clicks_timestamp",
+        ),
         Input(
             {"type": "label-class-button", "index": dash.dependencies.ALL},
             "n_clicks_timestamp",
         ),
         Input("stroke-width", "value"),
     ],
-    [State("masks", "data"),],
+    [
+        State("masks", "data"),
+        State("itime", "data"),
+    ],
 )
 def annotation_react(
     graph_relayoutData,
-    any_label_class_button_value,
+    image_nav_button_value,
+    label_class_button_value,
     stroke_width_value,
     masks_data,
+    itime_data,
 ):
+    if callback_context.triggered[0]['prop_id'] == '{"index":-1,"type":"nav-images-button"}.n_clicks_timestamp':
+        itime_data = max(0, itime_data-1)
+    if callback_context.triggered[0]['prop_id'] == '{"index":1,"type":"nav-images-button"}.n_clicks_timestamp':
+        itime_data = min(MAX_ITIME, itime_data+1)
+
     cbcontext = [p["prop_id"] for p in dash.callback_context.triggered][0]
     if cbcontext == "graph.relayoutData":
         if "shapes" in graph_relayoutData.keys():
@@ -206,23 +299,30 @@ def annotation_react(
             return dash.no_update
     stroke_width = int(round(2 ** (stroke_width_value)))
     # find label class value by finding button with the most recent click
-    if any_label_class_button_value is None:
+    if label_class_button_value is None:
         label_class_value = DEFAULT_LABEL_CLASS
     else:
         label_class_value = max(
-            enumerate(any_label_class_button_value),
+            enumerate(label_class_button_value),
             key=lambda t: 0 if t[1] is None else t[1],
         )[0]
 
-    fig = make_default_figure(
+    fig = ls_figure(
+        itime=itime_data,
         stroke_color=class_to_color(label_class_value),
         stroke_width=stroke_width,
-        shapes=masks_data["shapes"],
+        shapes=masks_data[itime_data]["shapes"],
     )
-    fig.update_layout(uirevision="segmentation")
+    mask = mask_figure(
+        (400,400),
+        shapes=masks_data[itime_data]["shapes"],
+    )
+    
     return (
         fig,
+        mask,
         masks_data,
+        itime_data,
     )
 
 
