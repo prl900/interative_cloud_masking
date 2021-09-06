@@ -12,6 +12,8 @@ import os
 import xarray as xr
 import numpy as np
 from skimage import draw
+from skimage.metrics import structural_similarity as ssim
+
 from scipy import ndimage
 
 #IMG_SIZE = 700
@@ -28,7 +30,28 @@ color2class = {"#56B4E9": np.uint8(1), "#E69F00":np.uint8(2)}
 
 class_labels = list(range(NUM_LABEL_CLASSES))
 
-ds = xr.open_dataset("http://dapds00.nci.org.au/thredds/dodsC/ub8/au/blobs/sample_stack.nc")
+#ds = xr.open_dataset("http://dapds00.nci.org.au/thredds/dodsC/ub8/au/blobs/sample_stack.nc")
+dsa = xr.open_dataset("/home/prl900/Downloads/s2a_10_22_2020.nc")
+dsa = dsa.rename_vars(name_dict={'nbart_nir_1':'nbart_nir','nbart_swir_2':'nbart_swir_1','nbart_swir_3':'nbart_swir_2'})
+dsb = xr.open_dataset("/home/prl900/Downloads/s2b_10_22_2020.nc")
+dsb = dsb.rename_vars(name_dict={'nbart_nir_1':'nbart_nir','nbart_swir_2':'nbart_swir_1','nbart_swir_3':'nbart_swir_2'})
+ds7 = xr.open_dataset("/home/prl900/Downloads/ls7_10_22_2020.nc")
+ds8 = xr.open_dataset("/home/prl900/Downloads/ls8_10_22_2020.nc")
+ds = xr.concat([dsa, dsb, ds7, ds8], dim='time').sortby('time')
+ds = ds.dropna('time', how='all')
+
+p30 = ds.nbart_blue.quantile(0.3, dim='time').values.astype(np.float32)
+ssim_idxs = []
+for i in range(len(ds.time)):
+    im = np.copy(ds.nbart_blue.isel(time=i).values)
+    if np.count_nonzero(np.isnan(im)) < im.size*0.5:
+        im[np.isnan(im)] = p30[np.isnan(im)]
+        ssim_idxs.append(ssim(p30, im))
+    else:
+        ssim_idxs.append(0.0)
+
+ds = ds.isel(time=np.array(ssim_idxs)>0.4)
+
 MAX_ITIME = len(ds.time.values)
 
 # we can't have less colors than classes
@@ -83,8 +106,8 @@ def ls_figure(
     stroke_width=int(round(2 ** (DEFAULT_STROKE_WIDTH))),
     shapes=[],
 ):
-    img = ds.nbart_blue.isel(x=slice(400, 800), y=slice(0,400), time=itime).values
-    fig = px.imshow(img, width=IMG_SIZE, height=IMG_SIZE)
+    img = ds.nbart_blue.isel(time=itime).values
+    fig = px.imshow(img, width=IMG_SIZE, height=IMG_SIZE, zmin=0, zmax=3000)
     fig.update_layout(
         {
             "dragmode": "drawclosedpath",
@@ -272,7 +295,7 @@ def annotation_react(n_clicks, masks_data):
         mask = path_to_mask(masks_data["shapes"][i], (400,400))
         stack = np.concatenate((stack, mask[None,:]), axis=0)
 
-    #np.save("masks", stack)
+    np.save("masks", stack)
 
     return
 
@@ -312,7 +335,7 @@ def annotation_react(
     if callback_context.triggered[0]['prop_id'] == '{"index":-1,"type":"nav-images-button"}.n_clicks_timestamp':
         itime_data = max(0, itime_data-1)
     if callback_context.triggered[0]['prop_id'] == '{"index":1,"type":"nav-images-button"}.n_clicks_timestamp':
-        itime_data = min(MAX_ITIME, itime_data+1)
+        itime_data = min(MAX_ITIME-1, itime_data+1)
 
     cbcontext = [p["prop_id"] for p in dash.callback_context.triggered][0]
     if cbcontext == "graph.relayoutData":
